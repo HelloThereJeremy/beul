@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # --- 1. CONFIGURATIE ---
-st.set_page_config(page_title="BEUL QUANT-STATION v5.0", layout="wide", page_icon="🎯")
+st.set_page_config(page_title="BEUL QUANT-STATION v5.1", layout="wide", page_icon="🎯")
 
 TICKERS = ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "GOOGL", "META", "ASML.AS", "WMT", "BTC-USD"]
 DB_FILE = "trade_history.csv"        
@@ -73,25 +73,25 @@ def log_daily_opportunity(opp_list):
         opp_df.to_csv(OPP_FILE, index=False)
 
 # --- 4. MAIN INTERFACE ---
-st.title("🎯 Beul Quant-Station v5.0")
+st.title("🎯 Beul Quant-Station v5.1")
 st.caption(f"Systeem Live | {datetime.now().strftime('%H:%M:%S')}")
 
 tab1, tab2, tab3 = st.tabs(["🔭 Sniper Radar", "📜 Portfolio & Truth", "📊 Backtest & Simulation"])
 
 with tab1:
     with st.spinner("Marktdata ophalen..."):
-        raw_data = yf.download(TICKERS, period="1y", interval="1d", progress=False)
-        # Fix: Gebruik 'Close' kolommen direct
-        close_data = raw_data['Close']
+        # group_by='ticker' voorkomt de NoneType error bij tickers zoals WMT
+        raw_data = yf.download(TICKERS, period="1y", interval="1d", progress=False, group_by='ticker')
     
     opp_list_today = []
     cols = st.columns(5)
     
     for i, ticker in enumerate(TICKERS):
         try:
-            prices = close_data[ticker].dropna()
-            if len(prices) < 30: continue
+            ticker_df = raw_data[ticker].dropna()
+            if ticker_df.empty: continue
             
+            prices = ticker_df['Close']
             curr_p, prev_p = float(prices.iloc[-1]), float(prices.iloc[-2])
             pnl_day = ((curr_p - prev_p) / prev_p) * 100
             h = get_hurst(prices.values)
@@ -131,7 +131,7 @@ with tab2:
                     df_trades.at[idx, "PnL %"] = round(((lp - row['Entry_Price']) / row['Entry_Price']) * 100, 2)
             df_trades.to_csv(DB_FILE, index=False)
             st.rerun()
-        st.dataframe(df_trades, use_container_width=True)
+        st.dataframe(df_trades, width="stretch")
         
         sel_t = st.selectbox("Simulatie voor:", df_trades['Ticker'].unique())
         if sel_t:
@@ -141,7 +141,7 @@ with tab2:
             for i in range(paths.shape[1]):
                 fig.add_trace(go.Scatter(y=paths[:, i], mode='lines', line=dict(width=1), opacity=0.1, showlegend=False))
             fig.update_layout(title=f"21-Dagen Projectie: {sel_t}", template="plotly_dark")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
     else:
         st.info("Geen trades in portfolio.")
 
@@ -151,9 +151,13 @@ with tab3:
     
     if st.button(f"Start Backtest voor {bt_ticker}"):
         with st.spinner("Analyseer historisch rendement..."):
-            # FIX: Squeeze zorgt dat data 1D wordt voor de DataFrame constructor
             df_bt = yf.download(bt_ticker, period="1y", interval="1d", progress=False)
-            prices_bt = df_bt['Close'].squeeze()
+            
+            # Slimme extractie om MultiIndex errors te voorkomen
+            if isinstance(df_bt.columns, pd.MultiIndex):
+                prices_bt = df_bt['Close'][bt_ticker].squeeze()
+            else:
+                prices_bt = df_bt['Close'].squeeze()
             
             if prices_bt.empty:
                 st.error("Geen data gevonden.")
@@ -161,7 +165,6 @@ with tab3:
                 rsi_bt = get_rsi(prices_bt)
                 hurst_bt = [get_hurst(prices_bt.iloc[max(0, i-30):i].values) for i in range(len(prices_bt))]
                 
-                # Zorg dat alle arrays even lang zijn
                 results = pd.DataFrame({
                     "Close": prices_bt.values,
                     "RSI": rsi_bt.values,
@@ -173,24 +176,23 @@ with tab3:
                 trade_log = []
                 
                 for i in range(len(results)-1):
-                    # Sniper condities: RSI laag + Hurst laag (mean reverting)
                     if results['RSI'].iloc[i] < 35 and results['Hurst'].iloc[i] < 0.45 and shares == 0:
                         shares = balance / results['Close'].iloc[i]
                         balance = 0
                         trade_log.append(f"🔴 KOOP op {results.index[i].date()} voor ${results['Close'].iloc[i]:.2f}")
-                    elif shares > 0 and (i % 10 == 0): # Verkoop elke 10e bar voor balans
+                    elif shares > 0 and (i % 10 == 0):
                         balance = shares * results['Close'].iloc[i]
                         shares = 0
                         trade_log.append(f"🟢 VERKOOP op {results.index[i].date()} voor ${results['Close'].iloc[i]:.2f}")
 
                 final_val = balance if shares == 0 else shares * prices_bt.iloc[-1]
-                st.metric("Eindresultaat (1 jaar)", f"${final_val:.2f}", f"{((final_val-1000)/10):.2f}%")
+                st.metric("Eindresultaat (Start $1000)", f"${final_val:.2f}", f"{((final_val-1000)/10):.2f}%")
                 
                 fig_bt = go.Figure()
                 fig_bt.add_trace(go.Scatter(x=results.index, y=results['Close'], name="Prijs"))
                 buys = results[(results['RSI'] < 35) & (results['Hurst'] < 0.45)]
                 fig_bt.add_trace(go.Scatter(x=buys.index, y=buys['Close'], mode='markers', marker=dict(color='orange', size=10), name="Entry Point"))
-                st.plotly_chart(fig_bt, use_container_width=True)
+                st.plotly_chart(fig_bt, width="stretch")
                 
                 with st.expander("Logs"):
                     for l in trade_log: st.write(l)
